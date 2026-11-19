@@ -1,5 +1,5 @@
-"""Downloads the VPN Gate list, keeps USA servers that actually respond,
-and saves servers.json."""
+"""Downloads the VPN Gate list, tests the servers, and saves servers.json.
+USA servers come first, then servers from other countries."""
 import base64
 import json
 import re
@@ -8,7 +8,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 URL = "https://www.vpngate.net/api/iphone/"
-MAX_SERVERS = 30        # how many servers to keep in servers.json
+MAX_SERVERS = 40        # how many servers to keep in servers.json
 MAX_UDP = 10            # UDP servers can't be tested, so keep only a few
 CHECK_TIMEOUT = 5       # seconds to wait for a TCP server to answer
 
@@ -44,7 +44,7 @@ for line in text.splitlines():
     if not line or line.startswith("*") or line.startswith("#"):
         continue
     f = line.split(",")
-    if len(f) < 15 or f[6] != "US":
+    if len(f) < 15:
         continue
     try:
         score = int(f[2])
@@ -58,13 +58,15 @@ for line in text.splitlines():
     candidates.append({
         "ip": f[1],
         "score": score,
+        "country": f[6],
         "config": config,
         "proto": proto,
         "host": host,
         "port": port,
     })
 
-print(f"{len(candidates)} USA servers in the VPN Gate list")
+print(f"{len(candidates)} servers in the VPN Gate list")
+print(f"{sum(1 for c in candidates if c['country'] == 'US')} of them are in the USA")
 
 
 def tcp_alive(c):
@@ -78,27 +80,32 @@ def tcp_alive(c):
 tcp = [c for c in candidates if c["proto"] == "tcp"]
 udp = [c for c in candidates if c["proto"] == "udp"]
 
-with ThreadPoolExecutor(max_workers=40) as pool:
+with ThreadPoolExecutor(max_workers=60) as pool:
     results = list(pool.map(tcp_alive, tcp))
 tcp_ok = [c for c, ok in zip(tcp, results) if ok]
 print(f"{len(tcp_ok)} of {len(tcp)} TCP servers responded")
 
-tcp_ok.sort(key=lambda c: c["score"], reverse=True)
-udp.sort(key=lambda c: c["score"], reverse=True)
 
-# Working TCP servers first, then a few UDP ones as a backup.
+def order(c):
+    # USA first, then the rest; best score first inside each group.
+    return (0 if c["country"] == "US" else 1, -c["score"])
+
+
+tcp_ok.sort(key=order)
+udp.sort(key=order)
+
 chosen = tcp_ok + udp[:MAX_UDP]
 chosen = chosen[:MAX_SERVERS]
 
 if not chosen:
-    raise SystemExit("No usable USA servers found, keeping the old file.")
+    raise SystemExit("No usable servers found, keeping the old file.")
 
 servers = [
-    {"ip": c["ip"], "score": c["score"], "config": c["config"]}
+    {"ip": c["ip"], "score": c["score"], "country": c["country"], "config": c["config"]}
     for c in chosen
 ]
 
 with open("servers.json", "w") as out:
     json.dump(servers, out)
 
-print(f"Saved {len(servers)} USA servers")
+print(f"Saved {len(servers)} servers")
